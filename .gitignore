@@ -12,3 +12,4 @@ __pycache__/
 # Ignore packaging/distribution things
 dist/
 *egg-info/
+build/

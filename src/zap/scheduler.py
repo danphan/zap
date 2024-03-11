@@ -1,4 +1,3 @@
-import numpy as np
 import matplotlib.pyplot as plt
 import torch 
 from torch.optim import Optimizer
@@ -32,12 +31,6 @@ def linear_warmup_cosine_annealing_scheduler(
             lr = lr_final + (max_lr - lr_final) / 2 * (1 + math.cos(math.pi * step / (num_annealing_steps - 1)))
 
         return lr  / min_lr
-    
-#    x = np.arange(total_steps)
-#    y = [learning_rate_fn(step) for step in x]
-#
-#    plt.plot(x,y)
-#    plt.savefig("test.png")
     
     return LambdaLR(optimizer = optimizer, lr_lambda = learning_rate_fn)
 

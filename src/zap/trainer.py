@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import torch 
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
-from torch.optim import Optimizer, Adam
+from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler, LambdaLR
 from typing import Dict, Callable
 from .logger import Logger
@@ -255,8 +255,6 @@ class Trainer:
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = min_lr
             param_group["initial_lr"] = min_lr
-        #self.optimizer = Adam(self.model.parameters(), lr = min_lr)
-
 
         self.scheduler = LambdaLR(
             optimizer = self.optimizer,
