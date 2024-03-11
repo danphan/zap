@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zap"
+version = "0.0.1"
+authors = [
+  { name="Dan Phan", email="danphan2884@gmail.com" },
+]
+description = "A basic pytorch Trainer class"
+readme = "README.md"
+requires-python = ">=3.11"

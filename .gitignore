@@ -1,0 +1,10 @@
+# Ignore compiled python files
+
+*.pyc
+__pycache__/
+
+# Ignore model weights
+*.pt
+
+# Ignore log files
+*.csv
