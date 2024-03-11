@@ -8,3 +8,7 @@ __pycache__/
 
 # Ignore log files
 *.csv
+
+# Ignore packaging/distribution things
+dist/
+*egg-info/
