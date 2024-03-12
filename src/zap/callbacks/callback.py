@@ -1,6 +1,5 @@
 from typing import Any, Union, Dict
 from pathlib import Path
-#from zap.trainer import Trainer
 from zap import trainer
 from zap.logger import Logger
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
@@ -11,19 +10,6 @@ class Callback:
 
     def on_train_start(self, trainer : "trainer.Trainer"):
         pass
-#
-#    def on_train_end(self, trainer : Trainer, model : nn.Module):
-#        pass
-#
-#    def on_batch_start(
-#        self, 
-#        trainer : Trainer, 
-#        model : nn.Module,
-#        batch : Any,
-#        batch_idx : int, #number of batches since the beginning of 
-#        global_step : int,
-#        ):
-#        pass
 
     def on_step_end(self, trainer : "trainer.Trainer", model_losses : Any):
         """
