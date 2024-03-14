@@ -10,6 +10,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from zap.callbacks import Callback
 from zap.autoclip import AutoClip
+from torchmetrics import Metric
 
 @dataclass
 class TrainerState:
@@ -22,7 +23,8 @@ class Trainer:
         model : nn.Module, 
         train_dataloader : DataLoader,
         val_dataloader : DataLoader,
-        val_metrics : Dict[str, Callable],
+        val_metrics : Dict[str, Metric],
+        #val_metrics : Dict[str, Callable],
         optimizer : Optimizer,
         use_amp : bool = True,
         device : str = "cuda",
@@ -39,7 +41,9 @@ class Trainer:
                     * an attribute `loss_names` which is the list of names for each loss component.
 
 
-            val_metrics (Dict[str, Callable]) : the callbacks one should run during validation. Each Callable should take in a batch 
+            #val_metrics (Dict[str, Callable]) : the callbacks one should run during validation. Each Callable should take in a batch 
+            #    and output floats.
+            val_metrics (Dict[str, Metric]) : the callbacks one should run during validation. Each Callable should take in a batch 
                 and output floats.
 
             autoclip_percentile (Optional[float]) : the percentile to use for autoclipping, in the range [0,100]. 
@@ -66,7 +70,7 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled = use_amp)
 
         ## Validation metrics/logging
-        self.val_metrics = val_metrics
+        self.val_metrics = {metric_name : metric.to(self.device) for metric_name, metric in val_metrics.items()}
 
         # For gradient clipping
         self.autoclipper = AutoClip(percentile=autoclip_percentile)
@@ -195,21 +199,31 @@ class Trainer:
             labels = batch["label"]
 
             batch_metrics = {metric_name : metric_fn(preds, labels) for metric_name, metric_fn in self.val_metrics.items()}
+
+            #batch_metrics = {}
+
+            ## Use torchmetrics Metric API
+            #for metric_name, metric in self.val_metrics.items():
+            #    batch_metrics[metric_name] = metric(preds, labels) # equivalent to using metric.forward(preds, labels)
+
             batch_losses = self.model.loss(preds, labels)
 
-            for k, v in batch_metrics.items():
-                metrics[k] = (metrics[k] * num_samples + v * batch_size) / (num_samples + batch_size)
+            #for k, v in batch_metrics.items():
+            #    metrics[k] = (metrics[k] * num_samples + v * batch_size) / (num_samples + batch_size)
 
             for k, v in batch_losses.items():
                 val_losses[k] = (val_losses[k] * num_samples + v * batch_size) / (num_samples + batch_size)
 
             num_samples += batch_size
 
+            #pbar.set_description(
+            #    ("{:<20.3g}" * num_metrics).format(*val_losses.values(), *metrics.values())
+            #)
             pbar.set_description(
-                ("{:<20.3g}" * num_metrics).format(*val_losses.values(), *metrics.values())
+                ("{:<20.3g}" * num_metrics).format(*val_losses.values(), *batch_metrics.values())
             )
 
-        metrics = val_losses | metrics
+        metrics = {metric_name : metric.compute() for metric_name, metric_fn in self.val_metrics.items()} | val_losses
 
         return metrics
 

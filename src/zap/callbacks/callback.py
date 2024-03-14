@@ -1,10 +1,14 @@
 from typing import Any, Union, Dict
+import os
+import functools
 from pathlib import Path
 from zap import trainer
 from zap.logger import Logger
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
 import torch
 from torch import nn
+from zap.dist import only_master_process
+
 
 class Callback:
 
