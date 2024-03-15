@@ -1,17 +1,22 @@
 from typing import Optional, Any, Dict, Callable, List
+import os
 from dataclasses import dataclass
 from tqdm import tqdm
 from collections import defaultdict
 import matplotlib.pyplot as plt
+
 import torch 
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
+from torchmetrics import Metric
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from zap.callbacks import Callback
 from zap.autoclip import AutoClip
-from torchmetrics import Metric
 from zap.metrics import LossTracker
+from zap.dist import is_distributed
 
 @dataclass
 class TrainerState:
@@ -27,9 +32,9 @@ class Trainer:
         optimizer : Optimizer,
         val_metrics : Optional[Dict[str, Metric]] = None,
         use_amp : bool = True,
-        device : str = "cuda",
         autoclip_percentile : Optional[float] = 10.0,
         callbacks : Optional[List[Callback]] = None,
+        device : Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -54,9 +59,20 @@ class Trainer:
 
         # Model
         self.model = model
-        self.device = device
-        self.device_type = device.split(":")[0] # "cuda" or "cpu"
-        self.model.to(device)
+
+        if is_distributed():
+            if device is not None:
+                raise ValueError("device should not be set when running a distributed job.")
+            self.device = int(os.environ["LOCAL_RANK"])
+            self.model.to(self.device)
+            self.model = DDP(self.model, device_ids = [self.device])
+        else:
+            self.device = device
+            self.model.to(self.device)
+
+        # Parallelism setup
+        self.rank = int(os.getenv("RANK",-1))
+        self.is_master_process = (self.rank < 1) #single-GPU jobs are the master process by default.
 
         # Training/validation data
         self.train_dataloader = train_dataloader
@@ -84,7 +100,8 @@ class Trainer:
         # Set up trainer state
         self.trainer_state = TrainerState() # initialize epoch and global_step to 0.
 
-        self.loss_tracker = LossTracker(self.model)
+        self.loss_tracker = LossTracker(self.model.module if is_distributed() else self.model)
+        self.loss_names = self.model.module.loss_names if is_distributed() else self.model.loss_names
 
     def run_callbacks(self, callback_method : str, *args, **kwargs):
         """
@@ -111,9 +128,10 @@ class Trainer:
             self.run_callbacks("on_epoch_end", self)
 
             # Validate
-            val_metrics = self.evaluate()
+            if self.val_metrics is not None:
+                val_metrics = self.evaluate()
 
-            self.run_callbacks("on_validation_end", self, val_metrics)
+                self.run_callbacks("on_validation_end", self, val_metrics)
 
             self.trainer_state.epoch += 1
 
@@ -125,7 +143,7 @@ class Trainer:
         batch = {k : v.to(self.device) for k, v in batch.items()}
 
         # Forward pass
-        with torch.autocast(device_type = self.device_type, dtype = torch.float16):
+        with torch.autocast(device_type = "cuda", dtype = torch.float16):
             losses : Dict[str, torch.Tensor] = self.model(**batch)
             total_loss = sum(losses.values())
             losses.update(total_loss = total_loss)
@@ -154,22 +172,29 @@ class Trainer:
     def train_one_epoch(self, num_epochs):
         self.model.train()
 
-        description = ("\n" + "{:20s}"*(3 + len(self.model.loss_names))).format(
+        description = ("\n" + "{:20s}"*(3 + len(self.loss_names))).format(
             "Epoch",
             "GPU_mem",
-            *self.model.loss_names,
+            *self.loss_names,
             "total_loss",
         )
-        print(description)
-        pbar = tqdm(enumerate(self.train_dataloader), total = len(self.train_dataloader))
+
+        if self.is_master_process:
+            print(description)
+        pbar = tqdm(enumerate(self.train_dataloader), total = len(self.train_dataloader), disable = not self.is_master_process)
         for batch_idx, batch in pbar:
             losses = self.train_one_step(batch, batch_idx)
+
 
             self.run_callbacks("on_step_end", self, losses)
 
             self.trainer_state.global_step += 1
 
             mem = f"{torch.cuda.memory_reserved(device = self.device)/1e9 if torch.cuda.is_available() else 0:.3g}G" # GB
+
+            # Logging only looks at the losses of the master process.
+            # We could reduce the losses to get the appropriate avg loss on the master process, but it's not worth it
+            # (the appropriately averaged loss would be the same order of magnitude, so who cares?)
             pbar.set_description(
                 ("{:20s}" + "{:20s}" + "{:<20.3g}"*len(losses.values())).format(
                     f"{self.trainer_state.epoch + 1}/{num_epochs}",
@@ -185,13 +210,15 @@ class Trainer:
         """
         self.model.eval()
 
+
         # Reset state of loss tracker to avoid contamination between epochs
         self.loss_tracker.clear_state()
 
-        num_metrics = len(self.model.loss_names) + len(self.val_metrics)
+        num_metrics = len(self.loss_names) + len(self.val_metrics)
 
-        print(("{:20s}" * num_metrics).format(*self.model.loss_names, *self.val_metrics.keys()))
-        pbar = tqdm(self.val_dataloader)
+        if self.is_master_process:
+            print(("{:20s}" * num_metrics).format(*self.loss_names, *self.val_metrics.keys()))
+        pbar = tqdm(self.val_dataloader, disable = not self.is_master_process)
         for batch in pbar:
             batch = {k : v.to(self.device) for k, v in batch.items()}
 
@@ -320,5 +347,3 @@ class Trainer:
         plt.ylabel("Loss")
         plt.savefig(plot_path)
 
-
-                
