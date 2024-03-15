@@ -14,8 +14,8 @@ from torchmetrics import Metric
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from zap.callbacks import Callback
-from zap.autoclip import AutoClip
-from zap.metrics import LossTracker
+from zap.clippers.autoclip import AutoClip
+from zap.loss_tracker import LossTracker
 from zap.dist import is_distributed
 from zap.dist.sampler import DistributedRandomSampler
 
