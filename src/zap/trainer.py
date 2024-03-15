@@ -185,6 +185,9 @@ class Trainer:
         """
         self.model.eval()
 
+        # Reset state of loss tracker to avoid contamination between epochs
+        self.loss_tracker.clear_state()
+
         num_metrics = len(self.model.loss_names) + len(self.val_metrics)
 
         print(("{:20s}" * num_metrics).format(*self.model.loss_names, *self.val_metrics.keys()))

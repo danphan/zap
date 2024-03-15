@@ -42,4 +42,7 @@ class LossTracker:
     def compute(self) -> Dict[str, torch.Tensor]:
         return {name : loss / self.num_samples for name, loss in self.total_loss.items()}
             
-            
+    def clear_state(self):
+        self.total_loss = {name : torch.tensor(0.) for name in self.model.loss_names}
+        self.num_samples = 0
+        

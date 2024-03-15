@@ -200,6 +200,10 @@ class DistTrainer:
         """
         self.model.eval()
 
+
+        # Reset state of loss tracker to avoid contamination between epochs
+        self.loss_tracker.clear_state()
+
         num_metrics = len(self.model.module.loss_names) + len(self.val_metrics)
 
         if self.is_master_process:
