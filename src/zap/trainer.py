@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from torchmetrics import Metric
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -17,6 +17,7 @@ from zap.callbacks import Callback
 from zap.autoclip import AutoClip
 from zap.metrics import LossTracker
 from zap.dist import is_distributed
+from zap.sampler import DistributedRandomSampler
 
 @dataclass
 class TrainerState:
@@ -30,6 +31,7 @@ class Trainer:
         train_dataloader : DataLoader,
         val_dataloader : DataLoader,
         optimizer : Optimizer,
+        lr_scheduler : Optional[LRScheduler] = None,
         val_metrics : Optional[Dict[str, Metric]] = None,
         use_amp : bool = True,
         autoclip_percentile : Optional[float] = 10.0,
@@ -80,6 +82,7 @@ class Trainer:
 
         # Optimization 
         self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
 
         # Automatic mixed precision
         self.use_amp = use_amp
@@ -92,7 +95,7 @@ class Trainer:
             self.val_metrics = None
 
         # For gradient clipping
-        self.autoclipper = AutoClip(percentile=autoclip_percentile)
+        self.autoclipper = None if (autoclip_percentile is None) else AutoClip(autoclip_percentile)
 
         # Set up callbacks
         self.callbacks = callbacks if (callbacks is not None) else []
@@ -100,7 +103,9 @@ class Trainer:
         # Set up trainer state
         self.trainer_state = TrainerState() # initialize epoch and global_step to 0.
 
-        self.loss_tracker = LossTracker(self.model.module if is_distributed() else self.model)
+        # Set up tracker for validation loss 
+        self.val_loss_tracker = LossTracker(self.model.module if is_distributed() else self.model)
+
         self.loss_names = self.model.module.loss_names if is_distributed() else self.model.loss_names
 
     def run_callbacks(self, callback_method : str, *args, **kwargs):
@@ -122,6 +127,11 @@ class Trainer:
         self.run_callbacks("on_train_start", self)
 
         for epoch in range(num_epochs):
+
+            # Reset sampler if training in a distributed fashion to ensure variation in shuffling
+            if is_distributed():
+                self.train_dataloader.sampler.set_epoch(epoch)
+
             # Train
             self.train_one_epoch(num_epochs)
 
@@ -155,7 +165,8 @@ class Trainer:
         self.scaler.unscale_(self.optimizer)
 
         # Clip the gradients, automatically determining an appropriate clipping value.
-        self.autoclipper.clip(self.model)
+        if self.autoclipper is not None:
+            self.autoclipper.clip(self.model)
 
         # optimizer's gradients are already unscaled, so scaler.step does not unscale them. 
         # update weights (if there aren't inf's or NaNs in grads. if so, no step is taken.)
@@ -181,10 +192,17 @@ class Trainer:
 
         if self.is_master_process:
             print(description)
+
         pbar = tqdm(enumerate(self.train_dataloader), total = len(self.train_dataloader), disable = not self.is_master_process)
+
         for batch_idx, batch in pbar:
+            # Perform one optimization step
             losses = self.train_one_step(batch, batch_idx)
 
+            # Avg losses across processes
+            if is_distributed():
+                for name in self.loss_names:
+                    torch.distributed.all_reduce(losses[name], torch.distributed.ReduceOp.AVG)
 
             self.run_callbacks("on_step_end", self, losses)
 
@@ -192,9 +210,6 @@ class Trainer:
 
             mem = f"{torch.cuda.memory_reserved(device = self.device)/1e9 if torch.cuda.is_available() else 0:.3g}G" # GB
 
-            # Logging only looks at the losses of the master process.
-            # We could reduce the losses to get the appropriate avg loss on the master process, but it's not worth it
-            # (the appropriately averaged loss would be the same order of magnitude, so who cares?)
             pbar.set_description(
                 ("{:20s}" + "{:20s}" + "{:<20.3g}"*len(losses.values())).format(
                     f"{self.trainer_state.epoch + 1}/{num_epochs}",
@@ -203,16 +218,21 @@ class Trainer:
                 )
             )
 
+        # Update learning rate
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+
 
     def evaluate(self) -> Dict[str, float]:
         """
-        Perform validation and return metrics (possibly for use with LR scheduling.)
+        Perform validation and return metrics.
         """
         self.model.eval()
 
-
-        # Reset state of loss tracker to avoid contamination between epochs
-        self.loss_tracker.clear_state()
+        # Reset state of loss tracker/metric to avoid contamination between epochs
+        self.val_loss_tracker.clear_state()
+        for metric in self.val_metrics.values():
+            metric.reset()
 
         num_metrics = len(self.loss_names) + len(self.val_metrics)
 
@@ -234,8 +254,8 @@ class Trainer:
                 running_metrics[name] = metric.compute()
 
             # Calculate running losses
-            self.loss_tracker.update(preds, labels)
-            running_losses = self.loss_tracker.compute()
+            self.val_loss_tracker.update(preds, labels)
+            running_losses = self.val_loss_tracker.compute()
 
             pbar.set_description(
                 ("{:<20.3g}" * num_metrics).format(*running_losses.values(), *running_metrics.values())
@@ -251,11 +271,17 @@ class Trainer:
 
         dataset = self.train_dataloader.dataset
 
-        sampler = RandomSampler(
-            data_source = dataset,
-            replacement = True,
-            num_samples = batch_size * num_iter,
-        )
+        if is_distributed():
+            sampler = DistributedRandomSampler(
+                data_source = dataset,
+                num_samples = batch_size * num_iter,
+            )
+        else:
+            sampler = RandomSampler(
+                data_source = dataset,
+                replacement = True,
+                num_samples = batch_size * num_iter,
+            )
 
         return DataLoader(
             dataset,
@@ -269,9 +295,9 @@ class Trainer:
     
     def find_lr(
         self, 
+        num_iter : int = 1000,
         min_lr : float = 1e-8, 
         max_lr : float = 1, 
-        num_iter : int = 1000,
         momentum : float = 0.98, 
         loss_file : str = "lr_finder.csv", 
         plot_path : str = "lr_finder.png",
@@ -317,14 +343,20 @@ class Trainer:
 
         iter_idx = 0
 
-        for batch in tqdm(loader):
-            batch_losses = self.train_one_step(batch)
+        for batch_idx, batch in tqdm(enumerate(loader), total = num_iter, disable = not self.is_master_process):
+            batch_losses = self.train_one_step(batch, batch_idx)
+
+            # Update learning rate
+            scheduler.step()
 
             # Plot losses
             total_batch_loss = batch_losses["total_loss"]
             #total_batch_loss = sum(batch_losses.values())
             avg_loss = momentum * avg_loss + (1 - momentum) * total_batch_loss
             smooth_loss = avg_loss / (1 - momentum ** (iter_idx + 1))
+
+            if is_distributed():
+                torch.distributed.all_reduce(smooth_loss, torch.distributed.ReduceOp.AVG)
 
             if iter_idx == 0 or smooth_loss < best_loss:
                 best_loss = smooth_loss
@@ -333,17 +365,19 @@ class Trainer:
                 break
 
             # Log losses
-            with open(loss_file,"a") as f:
-                lr = scheduler.get_last_lr()[0]
-                f.write(f"{lr},{smooth_loss:.8g}\n")
+            if self.is_master_process:
+                with open(loss_file,"a") as f:
+                    lr = scheduler.get_last_lr()[0]
+                    f.write(f"{lr},{smooth_loss:.8g}\n")
 
-            lr_list.append(lr)
-            loss_list.append(smooth_loss.detach().cpu().numpy().item())
+                lr_list.append(lr)
+                loss_list.append(smooth_loss.detach().cpu().numpy().item())
 
             iter_idx += 1
 
-        plt.semilogx(lr_list, loss_list)
-        plt.xlabel("Learning rate")
-        plt.ylabel("Loss")
-        plt.savefig(plot_path)
+        if self.is_master_process:
+            plt.semilogx(lr_list, loss_list)
+            plt.xlabel("Learning rate")
+            plt.ylabel("Loss")
+            plt.savefig(plot_path)
 
