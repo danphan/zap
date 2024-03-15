@@ -32,7 +32,8 @@ class LossTracker:
         for name in self.model.loss_names:
             if is_distributed():
                 # Add all losses (use all_reduce just in case)
-                dist.all_reduce(batch_losses[name], 0, dist.ReduceOp.SUM)
+                dist.all_reduce(batch_losses[name], dist.ReduceOp.SUM)
+                #dist.reduce(batch_losses[name], 0, dist.ReduceOp.SUM)
 
             self.total_loss[name] += batch_losses[name] * batch_size # unnormalize the loss, since it is defined per-sample
 

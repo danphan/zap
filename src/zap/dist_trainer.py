@@ -12,7 +12,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from zap.callbacks import Callback
 from zap.autoclip import AutoClip
 from torchmetrics import Metric
-import torch.nn.parallel.DistributedDataParallel as DDP
+from torch.nn.parallel import DistributedDataParallel as DDP
+from zap.metrics import LossTracker
 
 @dataclass
 class TrainerState:
@@ -25,9 +26,8 @@ class DistTrainer:
         model : nn.Module, 
         train_dataloader : DataLoader,
         val_dataloader : DataLoader,
-        val_metrics : Optional[Dict[str, Metric]] = None,
-        #val_metrics : Dict[str, Callable],
         optimizer : Optimizer,
+        val_metrics : Optional[Dict[str, Metric]] = None,
         use_amp : bool = True,
         autoclip_percentile : Optional[float] = 10.0,
         callbacks : Optional[List[Callback]] = None,
@@ -61,6 +61,8 @@ class DistTrainer:
 
         # Parallelism setup
         self.rank = int(os.environ["RANK"])
+        print(f"RANK: {self.rank}")
+        print(f"LOCALRANK: {self.device}")
         self.is_master_process = (self.rank == 0)
 
         # Training/validation data
@@ -88,6 +90,8 @@ class DistTrainer:
 
         # Set up trainer state
         self.trainer_state = TrainerState() # initialize epoch and global_step to 0.
+
+        self.loss_tracker = LossTracker(self.model.module)
 
     def run_callbacks(self, callback_method : str, *args, **kwargs):
         """
@@ -158,13 +162,15 @@ class DistTrainer:
     def train_one_epoch(self, num_epochs):
         self.model.train()
 
-        description = ("\n" + "{:20s}"*(3 + len(self.model.loss_names))).format(
+        description = ("\n" + "{:20s}"*(3 + len(self.model.module.loss_names))).format(
             "Epoch",
             "GPU_mem",
-            *self.model.loss_names,
+            *self.model.module.loss_names,
             "total_loss",
         )
-        print(description)
+
+        if self.is_master_process:
+            print(description)
         pbar = tqdm(enumerate(self.train_dataloader), total = len(self.train_dataloader), disable = not self.is_master_process)
         for batch_idx, batch in pbar:
             losses = self.train_one_step(batch, batch_idx)
@@ -194,17 +200,10 @@ class DistTrainer:
         """
         self.model.eval()
 
-        # Set up dictionary of metric values
-        val_losses = {loss_name : 0. for loss_name in self.model.loss_names}
+        num_metrics = len(self.model.module.loss_names) + len(self.val_metrics)
 
-        num_metrics = len(val_losses) + len(metrics)
-
-        num_samples = 0
-
-        # Keep track of running parameters
-        val_loss_states = {loss_name : torch.zeros((2,), device = self.device) for loss_name in self.val_metrics.keys()}
-
-        print(("{:20s}" * num_metrics).format(*val_losses.keys(), *metrics.keys()))
+        if self.is_master_process:
+            print(("{:20s}" * num_metrics).format(*self.model.module.loss_names, *self.val_metrics.keys()))
         pbar = tqdm(self.val_dataloader, disable = not self.is_master_process)
         for batch in pbar:
             batch = {k : v.to(self.device) for k, v in batch.items()}
@@ -214,36 +213,21 @@ class DistTrainer:
             batch_size = preds.shape[0]
             labels = batch["label"]
 
-            batch_metrics = {metric_name : metric_fn(preds, labels) for metric_name, metric_fn in self.val_metrics.items()}
+            # Calculate running metric
+            running_metrics = {}
+            for name, metric in self.val_metrics.items():
+                metric.update(preds, labels)
+                running_metrics[name] = metric.compute()
 
-            batch_losses = self.model.loss(preds, labels)
+            # Calculate running losses
+            self.loss_tracker.update(preds, labels)
+            running_losses = self.loss_tracker.compute()
 
-            # Reduce losses appropriately so that the master process has the appropriate value
-            for loss_name, loss in batch_losses.items():
-                torch.distributed.reduce(loss, 0, )
-                batch_losses[loss_name]
-                
-            batch_losses 
-
-
-            #for k, v in batch_metrics.items():
-            #    metrics[k] = (metrics[k] * num_samples + v * batch_size) / (num_samples + batch_size)
-
-            for k, v in batch_losses.items():
-                val_losses[k] = (val_losses[k] * num_samples + v * batch_size) / (num_samples + batch_size)
-
-            num_samples += batch_size
-
-            #pbar.set_description(
-            #    ("{:<20.3g}" * num_metrics).format(*val_losses.values(), *metrics.values())
-            #)
             pbar.set_description(
-                ("{:<20.3g}" * num_metrics).format(*val_losses.values(), *batch_metrics.values())
+                ("{:<20.3g}" * num_metrics).format(*running_losses.values(), *running_metrics.values())
             )
 
-        metrics = {metric_name : metric.compute() for metric_name, metric_fn in self.val_metrics.items()} | val_losses
-
-        return metrics
+        return running_metrics | running_losses
 
     def make_lr_finder_dataloader(
         self,

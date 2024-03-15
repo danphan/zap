@@ -24,9 +24,8 @@ class Trainer:
         model : nn.Module, 
         train_dataloader : DataLoader,
         val_dataloader : DataLoader,
-        val_metrics : Dict[str, Metric],
-        #val_metrics : Dict[str, Callable],
         optimizer : Optimizer,
+        val_metrics : Optional[Dict[str, Metric]] = None,
         use_amp : bool = True,
         device : str = "cuda",
         autoclip_percentile : Optional[float] = 10.0,
@@ -71,7 +70,10 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled = use_amp)
 
         ## Validation metrics/logging
-        self.val_metrics = {metric_name : metric.to(self.device) for metric_name, metric in val_metrics.items()}
+        if val_metrics is not None:
+            self.val_metrics = {metric_name : metric.to(self.device) for metric_name, metric in val_metrics.items()}
+        else:
+            self.val_metrics = None
 
         # For gradient clipping
         self.autoclipper = AutoClip(percentile=autoclip_percentile)
