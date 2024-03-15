@@ -17,7 +17,7 @@ from zap.callbacks import Callback
 from zap.autoclip import AutoClip
 from zap.metrics import LossTracker
 from zap.dist import is_distributed
-from zap.sampler import DistributedRandomSampler
+from zap.dist.sampler import DistributedRandomSampler
 
 @dataclass
 class TrainerState:
@@ -201,7 +201,7 @@ class Trainer:
 
             # Avg losses across processes
             if is_distributed():
-                for name in self.loss_names:
+                for name in losses.keys():
                     torch.distributed.all_reduce(losses[name], torch.distributed.ReduceOp.AVG)
 
             self.run_callbacks("on_step_end", self, losses)
