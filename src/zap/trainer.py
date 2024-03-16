@@ -331,8 +331,8 @@ class Trainer:
         min_lr : float = 1e-8, 
         max_lr : float = 1, 
         momentum : float = 0.98, 
-        loss_file : str = "lr_finder.csv", 
         plot_path : str = "lr_finder.png",
+        loss_file : Optional[str] = None, 
     ):
         """
         Performs the learning rate range test proposed by Smith in https://arxiv.org/pdf/1506.01186.pdf.
@@ -345,7 +345,7 @@ class Trainer:
             max_lr (float) : The maximum learning rate.
             num_iter (int) : the number of iterations (i.e. batches) to go through.
             momentum (float) : The momentum to use for the exponential moving average (must be between 0 and 1.)
-            loss_file (str) : The file in which the losses will be logged.
+            loss_file (Optional[str]) : The file in which the losses will be logged. If None, the losses are not written to a file.
             plot_path (str) : The output file for the loss vs learning-rate plot.
         """
 
@@ -370,8 +370,9 @@ class Trainer:
         lr_list = []
         loss_list = []
 
-        with open(loss_file,"w") as f:
-            f.write("lr,loss\n")
+        if loss_file is not None:
+            with open(loss_file,"w") as f:
+                f.write("lr,loss\n")
 
         iter_idx = 0
 
