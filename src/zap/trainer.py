@@ -1,4 +1,5 @@
-from typing import Optional, Any, Dict, Callable, List
+from typing import Optional, Any, Dict, Callable, List, Union
+from pathlib import Path
 import os
 from dataclasses import dataclass
 from tqdm import tqdm
@@ -13,7 +14,12 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from torchmetrics import Metric
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from zap.callbacks import Callback
+from zap.callbacks import (
+    Callback, 
+    DefaultCheckpointer,
+    TrainLossLogger,
+    ValidationMetricLogger,
+)
 from zap.clippers.autoclip import AutoClip
 from zap.loss_tracker import LossTracker
 from zap.dist import is_distributed
@@ -98,7 +104,14 @@ class Trainer:
         self.autoclipper = None if (autoclip_percentile is None) else AutoClip(autoclip_percentile)
 
         # Set up callbacks
-        self.callbacks = callbacks if (callbacks is not None) else []
+        if callbacks is None:
+            self.callbacks = [
+                DefaultCheckpointer(),
+                TrainLossLogger(),
+                ValidationMetricLogger(),
+            ]
+        else:
+            self.callbacks = callbacks
 
         # Set up trainer state
         self.trainer_state = TrainerState() # initialize epoch and global_step to 0.
@@ -107,6 +120,24 @@ class Trainer:
         self.val_loss_tracker = LossTracker(self.model.module if is_distributed() else self.model)
 
         self.loss_names = self.model.module.loss_names if is_distributed() else self.model.loss_names
+
+
+    def load_checkpoint(self, checkpoint_path : Union[str, Path]) -> None:
+        map_device = f"cuda:{self.device}" if isinstance(self.device, int) else self.device
+        trainer_state_dict = torch.load(checkpoint_path, map_location = map_device)
+
+        model = self.model.module if is_distributed() else self.model
+        model.load_state_dict(trainer_state_dict["model"])
+
+        self.optimizer.load_state_dict(trainer_state_dict["optimizer"])
+
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.load_state_dict(trainer_state_dict["lr_scheduler"])
+
+        self.trainer_state = TrainerState(
+            epoch = trainer_state_dict["epoch"],
+            global_step = trainer_state_dict["global_step"],
+        )
 
     def run_callbacks(self, callback_method : str, *args, **kwargs):
         """
@@ -126,7 +157,7 @@ class Trainer:
     def fit(self, num_epochs : int) -> None:
         self.run_callbacks("on_train_start", self)
 
-        for epoch in range(num_epochs):
+        for epoch in range(self.trainer_state.epoch, num_epochs):
 
             # Reset sampler if training in a distributed fashion to ensure variation in shuffling
             if is_distributed():
@@ -134,6 +165,8 @@ class Trainer:
 
             # Train
             self.train_one_epoch(num_epochs)
+
+            self.trainer_state.epoch += 1
 
             self.run_callbacks("on_epoch_end", self)
 
@@ -143,7 +176,6 @@ class Trainer:
 
                 self.run_callbacks("on_validation_end", self, val_metrics)
 
-            self.trainer_state.epoch += 1
 
     def train_one_step(self, batch : Dict[str, Any], batch_idx : int) -> Dict[str, torch.Tensor]:
         """
