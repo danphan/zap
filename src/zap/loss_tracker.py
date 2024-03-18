@@ -19,6 +19,7 @@ class LossTracker:
         self.model = model
         self.total_loss = {name : torch.tensor(0.) for name in self.model.loss_names}
         self.num_samples = 0
+        self.num_replicas = dist.get_world_size() if is_distributed() else 1
 
     def update(self, preds : torch.Tensor, labels : torch.Tensor) -> None:
         """
@@ -37,7 +38,7 @@ class LossTracker:
 
             self.total_loss[name] += batch_losses[name] * batch_size # unnormalize the loss, since it is defined per-sample
 
-        self.num_samples += batch_size
+        self.num_samples += batch_size * self.num_replicas
 
     def compute(self) -> Dict[str, torch.Tensor]:
         return {name : loss / self.num_samples for name, loss in self.total_loss.items()}
