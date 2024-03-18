@@ -13,6 +13,9 @@ class Callback:
         """
         pass
 
+    def on_epoch_start(self, trainer : "trainer.Trainer"):
+        pass
+
     def on_epoch_end(self, trainer : "trainer.Trainer"):
         """
         Event called after finishing epoch, but before validation.

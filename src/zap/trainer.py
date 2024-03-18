@@ -227,6 +227,8 @@ class Trainer:
 
         pbar = tqdm(enumerate(self.train_dataloader), total = len(self.train_dataloader), disable = not self.is_master_process)
 
+        self.run_callbacks("on_epoch_start", self)
+
         for batch_idx, batch in pbar:
             # Perform one optimization step
             losses = self.train_one_step(batch, batch_idx)
@@ -399,9 +401,10 @@ class Trainer:
 
             # Log losses
             if self.is_master_process:
-                with open(loss_file,"a") as f:
-                    lr = scheduler.get_last_lr()[0]
-                    f.write(f"{lr},{smooth_loss:.8g}\n")
+                lr = scheduler.get_last_lr()[0]
+                if loss_file is not None:
+                    with open(loss_file,"a") as f:
+                        f.write(f"{lr},{smooth_loss:.8g}\n")
 
                 lr_list.append(lr)
                 loss_list.append(smooth_loss.detach().cpu().numpy().item())
