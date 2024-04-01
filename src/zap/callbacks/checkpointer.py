@@ -56,6 +56,10 @@ class BestAndLastCheckpointer(Callback):
     """
     def __init__(self, metric_to_track : str, mode : str = "max", checkpoint_dir : Union[str, Path] = "."):
         self.checkpoint_dir = Path(checkpoint_dir)
+
+        # Create checkpoint directory
+        self.checkpoint_dir.mkdir(parents = True, exist_ok = True)
+
         self.best_checkpoint_path = self.checkpoint_dir / "best.pt"
         self.last_checkpoint_path = self.checkpoint_dir / "last.pt"
         if mode not in ["min", "max"]:

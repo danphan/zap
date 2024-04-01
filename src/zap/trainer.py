@@ -122,21 +122,22 @@ class Trainer:
         self.loss_names = self.model.module.loss_names if is_distributed() else self.model.loss_names
 
 
-    def load_checkpoint(self, checkpoint_path : Union[str, Path]) -> None:
+    def load_checkpoint(self, checkpoint_path : Union[str, Path], only_model_weights = True) -> None:
         map_device = f"cuda:{self.device}" if isinstance(self.device, int) else self.device
         trainer_state_dict = torch.load(checkpoint_path, map_location = map_device)
 
         model = self.model.module if is_distributed() else self.model
         model.load_state_dict(trainer_state_dict["model"])
 
-        self.optimizer.load_state_dict(trainer_state_dict["optimizer"])
+        if not only_model_weights:
+            self.optimizer.load_state_dict(trainer_state_dict["optimizer"])
 
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.load_state_dict(trainer_state_dict["lr_scheduler"])
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.load_state_dict(trainer_state_dict["lr_scheduler"])
 
-        self.trainer_state = TrainerState(
-            epoch = trainer_state_dict["epoch"],
-            global_step = trainer_state_dict["global_step"],
+            self.trainer_state = TrainerState(
+                epoch = trainer_state_dict["epoch"],
+                global_step = trainer_state_dict["global_step"],
         )
 
     def run_callbacks(self, callback_method : str, *args, **kwargs):
@@ -261,6 +262,7 @@ class Trainer:
         """
         Perform validation and return metrics.
         """
+
         self.model.eval()
 
         # Reset state of loss tracker/metric to avoid contamination between epochs
@@ -273,23 +275,32 @@ class Trainer:
         if self.is_master_process:
             print(("{:20s}" * num_metrics).format(*self.loss_names, *self.val_metrics.keys()))
         pbar = tqdm(self.val_dataloader, disable = not self.is_master_process)
+
+        
+
         for batch in pbar:
             batch = {k : v.to(self.device) for k, v in batch.items()}
 
             with torch.no_grad():
                 preds = self.model(**batch)
+
+                # Get outputs for validation metrics
+                model = self.model.module if is_distributed() else self.model
+                outputs = model.postprocess(preds)
+
             batch_size = preds.shape[0]
             labels = batch["label"]
-
-            # Calculate running metric
-            running_metrics = {}
-            for name, metric in self.val_metrics.items():
-                metric.update(preds, labels)
-                running_metrics[name] = metric.compute()
 
             # Calculate running losses
             self.val_loss_tracker.update(preds, labels)
             running_losses = self.val_loss_tracker.compute()
+
+            # Calculate running metric
+            running_metrics = {}
+            for name, metric in self.val_metrics.items():
+                metric.update(outputs, labels)
+                running_metrics[name] = metric.compute()
+
 
             pbar.set_description(
                 ("{:<20.3g}" * num_metrics).format(*running_losses.values(), *running_metrics.values())

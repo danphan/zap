@@ -11,8 +11,9 @@ class UnfreezeModel(Callback):
     Args:
         epoch (int) : The epoch at which we want to unfreeze the parameters.
     """
-    def __init__(self, epoch : int):
+    def __init__(self, epoch : int, finetune_lr : float = 1e-6):
         self.epoch = epoch
+        self.finetune_lr = finetune_lr
 
     def on_epoch_start(self, trainer : "trainer.Trainer"):
         if trainer.trainer_state.epoch == self.epoch:
@@ -20,35 +21,39 @@ class UnfreezeModel(Callback):
             for p in model.parameters():
                 p.requires_grad = True
 
-class EarlyStopping(Callback):
-    def __init__(self, metric_to_track : str, mode : str = "max", patience : int = 10):
-        self.metric_to_track = metric_to_track
-        self.patience = patience
+            # Set learning rate to small value
+            for group in trainer.optimizer.param_groups:
+                group["lr"] = self.finetune_lr
 
-        # Set up tracking metrics
-        self.epochs_since_best = 0
-        self.best_metric = None
-
-    def on_validation_end(self, trainer : "trainer.Trainer", val_metrics, Dict[str, Any]):
-        current_metric = val_metrics[self.metric_to_track]
-        if (
-            self.best_metric is None or
-            (self.mode == "max" and (current_metric > self.best_metric)) or 
-            (self.mode == "min" and (current_metric < self.best_metric))
-        ):
-            self.best_metric = current_metric
-            self.epochs_since_best = 0
-        else:
-            self.epochs_since_best += 1
-
-        if self.epochs_since_best > self.patience:
-            if trainer.is_master_process:
-                print(f"It has been {self.epochs_since_best} epochs since the model's {self.metric_to_track} has improved. Stopping training.")
-            break
-
-            
-            
-        
-        
-    
-
+#class EarlyStopping(Callback):
+#    def __init__(self, metric_to_track : str, mode : str = "max", patience : int = 10):
+#        self.metric_to_track = metric_to_track
+#        self.patience = patience
+#
+#        # Set up tracking metrics
+#        self.epochs_since_best = 0
+#        self.best_metric = None
+#
+#    def on_validation_end(self, trainer : "trainer.Trainer", val_metrics : Dict[str, Any]):
+#        current_metric = val_metrics[self.metric_to_track]
+#        if (
+#            self.best_metric is None or
+#            (self.mode == "max" and (current_metric > self.best_metric)) or 
+#            (self.mode == "min" and (current_metric < self.best_metric))
+#        ):
+#            self.best_metric = current_metric
+#            self.epochs_since_best = 0
+#        else:
+#            self.epochs_since_best += 1
+#
+#        if self.epochs_since_best > self.patience:
+#            if trainer.is_master_process:
+#                print(f"It has been {self.epochs_since_best} epochs since the model's {self.metric_to_track} has improved. Stopping training.")
+#            break
+#
+#            
+#            
+#        
+#        
+#    
+#
